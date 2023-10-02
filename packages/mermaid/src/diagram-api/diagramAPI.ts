@@ -43,25 +43,26 @@ export const registerDiagram = (
   diagram: DiagramDefinition,
   detector?: DiagramDetector
 ) => {
-  if (diagrams[id]) {
-    throw new Error(`Diagram ${id} already registered.`);
-  }
-  diagrams[id] = diagram;
-  if (detector) {
-    addDetector(id, detector);
-  }
-  addStylesForDiagram(id, diagram.styles);
+  if (!diagrams[id]) { 
+    diagrams[id] = diagram;
+    if (detector) {
+      addDetector(id, detector);
+    }
+    addStylesForDiagram(id, diagram.styles);
 
-  if (diagram.injectUtils) {
-    diagram.injectUtils(
-      log,
-      setLogLevel,
-      getConfig,
-      sanitizeText,
-      setupGraphViewbox,
-      getCommonDb(),
-      parseDirective
-    );
+    if (diagram.injectUtils) {
+      diagram.injectUtils(
+        log,
+        setLogLevel,
+        getConfig,
+        sanitizeText,
+        setupGraphViewbox,
+        getCommonDb(),
+        parseDirective
+      );
+    }
+  }else {
+    log.info("Diagram ${id} already registered. Skipping register");
   }
 };
 

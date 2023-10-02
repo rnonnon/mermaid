@@ -558,6 +558,172 @@ const render = async function (
   };
 };
 
+const renderDiagram = async function (
+  id: string,
+  diag: Diagram,
+  svgContainingElement?: Element
+): Promise<RenderResult> {
+  addDiagrams();
+
+  configApi.reset();
+
+  // We need to add the directives before creating the diagram.
+  // So extractFrontMatter is called twice. Once here and once in the diagram parser.
+  // This can be fixed in a future refactor.
+  extractFrontMatter(diag.text, {}, configApi.addDirective);
+
+  // Add Directives.
+  const graphInit = utils.detectInit(diag.text);
+  if (graphInit) {
+    configApi.addDirective(graphInit);
+  }
+
+  const config = configApi.getConfig();
+  log.debug(config);
+
+  // Check the maximum allowed text size
+  if (diag.text.length > (config?.maxTextSize ?? MAX_TEXTLENGTH)) {
+    diag.text = MAX_TEXTLENGTH_EXCEEDED_MSG;
+  }
+
+  // clean up text CRLFs
+  var text = diag.text.replace(/\r\n?/g, '\n'); // parser problems on CRLF ignore all CR and leave LF;;
+
+  // clean up html tags so that all attributes use single quotes, parser throws error on double quotes
+  text = diag.text.replace(
+    /<(\w+)([^>]*)>/g,
+    (match, tag, attributes) => '<' + tag + attributes.replace(/="([^"]*)"/g, "='$1'") + '>'
+  );
+
+  const idSelector = '#' + id;
+  const iFrameID = 'i' + id;
+  const iFrameID_selector = '#' + iFrameID;
+  const enclosingDivID = 'd' + id;
+  const enclosingDivID_selector = '#' + enclosingDivID;
+
+  let root: any = select('body');
+
+  const isSandboxed = config.securityLevel === SECURITY_LVL_SANDBOX;
+  const isLooseSecurityLevel = config.securityLevel === SECURITY_LVL_LOOSE;
+
+  const fontFamily = config.fontFamily;
+
+  // -------------------------------------------------------------------------------
+  // Define the root d3 node
+  // In regular execution the svgContainingElement will be the element with a mermaid class
+
+  if (svgContainingElement !== undefined) {
+    if (svgContainingElement) {
+      svgContainingElement.innerHTML = '';
+    }
+
+    if (isSandboxed) {
+      // If we are in sandboxed mode, we do everything mermaid related in a (sandboxed )iFrame
+      const iframe = sandboxedIframe(select(svgContainingElement), iFrameID);
+      root = select(iframe.nodes()[0]!.contentDocument!.body);
+      root.node().style.margin = 0;
+    } else {
+      root = select(svgContainingElement);
+    }
+    appendDivSvgG(root, id, enclosingDivID, `font-family: ${fontFamily}`, XMLNS_XLINK_STD);
+  } else {
+    // No svgContainingElement was provided
+
+    // If there is an existing element with the id, we remove it. This likely a previously rendered diagram
+    removeExistingElements(document, id, enclosingDivID, iFrameID);
+
+    // Add the temporary div used for rendering with the enclosingDivID.
+    // This temporary div will contain a svg with the id == id
+
+    if (isSandboxed) {
+      // If we are in sandboxed mode, we do everything mermaid related in a (sandboxed) iFrame
+      const iframe = sandboxedIframe(select('body'), iFrameID);
+      root = select(iframe.nodes()[0]!.contentDocument!.body);
+      root.node().style.margin = 0;
+    } else {
+      root = select('body');
+    }
+
+    appendDivSvgG(root, id, enclosingDivID);
+  }
+
+  text = encodeEntities(text);
+
+  // -------------------------------------------------------------------------------
+  // Create the diagram
+
+  // Get the temporary div element containing the svg
+  const element = root.select(enclosingDivID_selector).node();
+  const diagramType = diag.type;
+
+  // -------------------------------------------------------------------------------
+  // Create and insert the styles (user styles, theme styles, config styles)
+
+  // Insert an element into svg. This is where we put the styles
+  const svg = element.firstChild;
+  const firstChild = svg.firstChild;
+  const diagramClassDefs = CLASSDEF_DIAGRAMS.includes(diagramType)
+    ? diag.renderer.getClasses(text, diag)
+    : {};
+
+  const rules = createUserStyles(config, diagramType, diagramClassDefs, idSelector);
+
+  const style1 = document.createElement('style');
+  style1.innerHTML = rules;
+  svg.insertBefore(style1, firstChild);
+
+  // -------------------------------------------------------------------------------
+  // Draw the diagram with the renderer
+  try {
+    await diag.renderer.draw(text, id, version, diag);
+  } catch (e) {
+    errorRenderer.draw(text, id, version);
+    throw e;
+  }
+
+  // This is the d3 node for the svg element
+  const svgNode = root.select(`${enclosingDivID_selector} svg`);
+  const a11yTitle: string | undefined = diag.db.getAccTitle?.();
+  const a11yDescr: string | undefined = diag.db.getAccDescription?.();
+  addA11yInfo(diagramType, svgNode, a11yTitle, a11yDescr);
+
+  // -------------------------------------------------------------------------------
+  // Clean up SVG code
+  root.select(`[id="${id}"]`).selectAll('foreignobject > *').attr('xmlns', XMLNS_XHTML_STD);
+
+  // Fix for when the base tag is used
+  let svgCode: string = root.select(enclosingDivID_selector).node().innerHTML;
+
+  log.debug('config.arrowMarkerAbsolute', config.arrowMarkerAbsolute);
+  svgCode = cleanUpSvgCode(svgCode, isSandboxed, evaluate(config.arrowMarkerAbsolute));
+
+  if (isSandboxed) {
+    const svgEl = root.select(enclosingDivID_selector + ' svg').node();
+    svgCode = putIntoIFrame(svgCode, svgEl);
+  } else if (!isLooseSecurityLevel) {
+    // Sanitize the svgCode using DOMPurify
+    svgCode = DOMPurify.sanitize(svgCode, {
+      ADD_TAGS: DOMPURIFY_TAGS,
+      ADD_ATTR: DOMPURIFY_ATTR,
+    });
+  }
+
+  attachFunctions();
+
+  // -------------------------------------------------------------------------------
+  // Remove the temporary HTML element if appropriate
+  const tmpElementSelector = isSandboxed ? iFrameID_selector : enclosingDivID_selector;
+  const node = select(tmpElementSelector).node();
+  if (node && 'remove' in node) {
+    node.remove();
+  }
+
+  return {
+    svg: svgCode,
+    bindFunctions: diag.db.bindFunctions,
+  };
+};
+
 /**
  * @param  options - Initial Mermaid options
  */
@@ -672,6 +838,7 @@ function addA11yInfo(
 
 export const mermaidAPI = Object.freeze({
   render,
+  renderDiagram,
   parse,
   parseDirective,
   getDiagramFromText,
